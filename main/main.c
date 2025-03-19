@@ -77,7 +77,7 @@ void echo_task(void *p) {
             }
         }
     }
-}
+
 
 void oled_task(void *p) {
     ssd1306_t disp;
