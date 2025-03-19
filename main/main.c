@@ -17,7 +17,6 @@ SemaphoreHandle_t xSemaphoreTrigger;
 
 volatile bool fail = false;
 volatile uint32_t start_echo = 0;
-volatile float distance = 0.0;
 volatile alarm_id_t alarm_id = -1;
 
 int64_t alarm_callback(alarm_id_t id, void *user_data) {
@@ -28,6 +27,7 @@ int64_t alarm_callback(alarm_id_t id, void *user_data) {
 
 void pin_callback(uint gpio, uint32_t events) {
     uint32_t end_echo, duration;
+
     if (events & GPIO_IRQ_EDGE_RISE) {
         start_echo = time_us_32();
         fail = false;
@@ -35,12 +35,12 @@ void pin_callback(uint gpio, uint32_t events) {
             cancel_alarm(alarm_id);
         }
         alarm_id = add_alarm_in_ms(100, alarm_callback, NULL, false);
-    } else if (events & GPIO_IRQ_EDGE_FALL) {
+    } 
+    else if (events & GPIO_IRQ_EDGE_FALL) {
         end_echo = time_us_32();
         if (start_echo > 0) {
             duration = end_echo - start_echo;
-            distance = (duration * 0.034) / 2;
-            xQueueSendFromISR(xQueueDistance, &distance, NULL);
+            xQueueSendFromISR(xQueueTime, &duration, NULL);
         }
         if (alarm_id != -1) {
             cancel_alarm(alarm_id);
@@ -61,10 +61,20 @@ void trigger_task(void *p) {
 
 void echo_task(void *p) {
     uint32_t echo_time;
+    float dist;
+    
     while (1) {
         if (xQueueReceive(xQueueTime, &echo_time, portMAX_DELAY)) {
-            float dist = (echo_time * 0.034) / 2;
-            xQueueSend(xQueueDistance, &dist, portMAX_DELAY);
+            dist = (echo_time * 0.034) / 2;
+
+            if (dist > 400) {
+                fail = true;
+            } else if (dist < 2){
+                fail = true;
+            } else
+                fail = false;
+                xQueueSend(xQueueDistance, &dist, portMAX_DELAY);
+            }
         }
     }
 }
@@ -89,7 +99,6 @@ void oled_task(void *p) {
             gfx_clear_buffer(&disp);
             gfx_draw_string(&disp, 0, 0, 1, "Falha na leitura");
             gfx_show(&disp);
-            fail = false;
         }
     }
 }
