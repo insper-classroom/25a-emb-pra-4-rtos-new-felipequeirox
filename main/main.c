@@ -13,38 +13,50 @@
 
 QueueHandle_t xQueueTime;
 QueueHandle_t xQueueDistance;
+QueueHandle_t xQueueFail;
 SemaphoreHandle_t xSemaphoreTrigger;
 
-volatile bool fail = false;
-volatile uint32_t start_echo = 0;
-volatile alarm_id_t alarm_id = -1;
-
 int64_t alarm_callback(alarm_id_t id, void *user_data) {
-    fail = true;
-    alarm_id = -1;
+    bool fail = true;
+    xQueueSendFromISR(xQueueFail, &fail, NULL);
     return 0;
 }
 
 void pin_callback(uint gpio, uint32_t events) {
+    static QueueHandle_t xQueueStartEcho;
+    static QueueHandle_t xQueueAlarmId;
+
     uint32_t end_echo, duration;
+    alarm_id_t alarm_id;
+    uint32_t start_echo;
+
+    if (xQueueStartEcho == NULL) {
+        xQueueStartEcho = xQueueCreate(1, sizeof(uint32_t));
+        xQueueAlarmId = xQueueCreate(1, sizeof(alarm_id_t));
+    }
 
     if (events & GPIO_IRQ_EDGE_RISE) {
         start_echo = time_us_32();
-        fail = false;
-        if (alarm_id != -1) {
+        xQueueSendFromISR(xQueueStartEcho, &start_echo, NULL);
+
+        bool fail = false;
+        xQueueSendFromISR(xQueueFail, &fail, NULL);
+
+        if (xQueueReceive(xQueueAlarmId, &alarm_id, 0)) {
             cancel_alarm(alarm_id);
         }
         alarm_id = add_alarm_in_ms(100, alarm_callback, NULL, false);
+        xQueueSendFromISR(xQueueAlarmId, &alarm_id, NULL);
     } 
     else if (events & GPIO_IRQ_EDGE_FALL) {
-        end_echo = time_us_32();
-        if (start_echo > 0) {
+        if (xQueueReceive(xQueueStartEcho, &start_echo, 0)) {
+            end_echo = time_us_32();
             duration = end_echo - start_echo;
             xQueueSendFromISR(xQueueTime, &duration, NULL);
         }
-        if (alarm_id != -1) {
+
+        if (xQueueReceive(xQueueAlarmId, &alarm_id, 0)) {
             cancel_alarm(alarm_id);
-            alarm_id = -1;
         }
     }
 }
@@ -52,7 +64,7 @@ void pin_callback(uint gpio, uint32_t events) {
 void trigger_task(void *p) {
     while (1) {
         gpio_put(TRIGGER_PIN, 1);
-        sleep_us(15);
+        vTaskDelay(pdMS_TO_TICKS(15));
         gpio_put(TRIGGER_PIN, 0);
         xSemaphoreGive(xSemaphoreTrigger);
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -67,17 +79,15 @@ void echo_task(void *p) {
         if (xQueueReceive(xQueueTime, &echo_time, portMAX_DELAY)) {
             dist = (echo_time * 0.034) / 2;
 
-            if (dist > 400) {
-                fail = true;
-            } else if (dist < 2){
-                fail = true;
-            } else
-                fail = false;
+            bool fail = (dist > 400 || dist < 2);
+            xQueueSend(xQueueFail, &fail, portMAX_DELAY);
+
+            if (!fail) {
                 xQueueSend(xQueueDistance, &dist, portMAX_DELAY);
             }
         }
     }
-
+}
 
 void oled_task(void *p) {
     ssd1306_t disp;
@@ -85,6 +95,7 @@ void oled_task(void *p) {
     gfx_init(&disp, 128, 32);
 
     float dist;
+    bool fail;
     while (1) {
         if (xQueueReceive(xQueueDistance, &dist, pdMS_TO_TICKS(200))) {
             gfx_clear_buffer(&disp);
@@ -95,7 +106,7 @@ void oled_task(void *p) {
             if (bar_length > 128) bar_length = 128;
             gfx_draw_line(&disp, 0, 10, bar_length, 10);
             gfx_show(&disp);
-        } else if (fail) {
+        } else if (xQueueReceive(xQueueFail, &fail, 0) && fail) {
             gfx_clear_buffer(&disp);
             gfx_draw_string(&disp, 0, 0, 1, "Falha na leitura");
             gfx_show(&disp);
@@ -115,6 +126,7 @@ int main() {
 
     xQueueTime = xQueueCreate(10, sizeof(uint32_t));
     xQueueDistance = xQueueCreate(10, sizeof(float));
+    xQueueFail = xQueueCreate(10, sizeof(bool));
     xSemaphoreTrigger = xSemaphoreCreateBinary();
 
     xTaskCreate(trigger_task, "Trigger Task", 256, NULL, 1, NULL);
